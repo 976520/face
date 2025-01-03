@@ -1,69 +1,76 @@
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
-import face_recognition
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
 import dlib
-from threading import Thread
-import queue
 
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
+def create_lip_reading_model():
+    model = Sequential([
+        Conv2D(32, (3, 3), activation='relu', input_shape=(100, 100, 1)),
+        MaxPooling2D(2, 2),
+        Conv2D(64, (3, 3), activation='relu'),
+        MaxPooling2D(2, 2),
+        Conv2D(128, (3, 3), activation='relu'),
+        MaxPooling2D(2, 2),
+        Flatten(),
+        Dense(128, activation='relu'),
+        Dropout(0.5),
+        Dense(10, activation='softmax')  # softmax
+    ])
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
 
-frame_queue = queue.Queue(maxsize=2)
-processed_frame_queue = queue.Queue(maxsize=2)
-
-def process_frame(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = detector(gray)
+def detect_and_process_lips():
+    cap = cv2.VideoCapture(0)
     
-    for face in faces:
-        landmarks = predictor(gray, face)
-        
-        left_eye_coords = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(36, 42)]
-        right_eye_coords = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(42, 48)]
-        
-        left_eye = np.array(left_eye_coords, np.int32)
-        right_eye = np.array(right_eye_coords, np.int32)
-        
-        cv2.polylines(frame, [left_eye], True, (0, 255, 0), 1)
-        cv2.polylines(frame, [right_eye], True, (0, 255, 0), 1)
+    detector = dlib.get_frontal_face_detector()
+    predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
     
-    return frame
-
-def frame_processor():
+    model = create_lip_reading_model()
+    # model.load_weights('lip_reading_model.h5')
+    
     while True:
-        if frame_queue.empty():
-            continue
-        frame = frame_queue.get()
-        if frame is None:
+        ret, frame = cap.read()
+        if not ret:
             break
-        processed = process_frame(frame)
-        processed_frame_queue.put(processed)
-
-processor_thread = Thread(target=frame_processor)
-processor_thread.start()
-
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-cap.set(cv2.CAP_PROP_FPS, 30)
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+            
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = detector(gray)
+        
+        for face in faces:
+            landmarks = predictor(gray, face)
+            
+            # 48-68
+            lip_points = []
+            for n in range(48, 68):
+                x = landmarks.part(n).x
+                y = landmarks.part(n).y
+                lip_points.append((x, y))
+            
+            lip_points = np.array(lip_points)
+            x, y, w, h = cv2.boundingRect(lip_points)
+            lip_roi = gray[y:y+h, x:x+w]
+            
+            if lip_roi.size > 0:
+                lip_roi = cv2.resize(lip_roi, (100, 100))
+                lip_roi = lip_roi.reshape(1, 100, 100, 1)
+                
+                prediction = model.predict(lip_roi)
+                predicted_word = ["zero", "one", "two", "three", "four", 
+                                "five", "six", "seven", "eight", "nine"][np.argmax(prediction)]
+                
+                cv2.putText(frame, predicted_word, (x, y-10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                
+            cv2.polylines(frame, [lip_points], True, (0, 255, 0), 2)
+        
+        cv2.imshow('Lip Reading', frame)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
     
-    if not frame_queue.full():
-        frame_queue.put(frame)
-    
-    if not processed_frame_queue.empty():
-        processed_frame = processed_frame_queue.get()
-        cv2.imshow('eye', processed_frame)
-    
-    if cv2.waitKey(1) & 0xFF == ord('s'):
-        break
+    cap.release()
+    cv2.destroyAllWindows()
 
-frame_queue.put(None)
-processor_thread.join()
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    detect_and_process_lips()
